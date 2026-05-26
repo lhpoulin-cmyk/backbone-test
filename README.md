@@ -83,8 +83,10 @@ The source-blast hour profile repeats until the configured wall clock expires:
 
 The source-blast controller writes `baselines.tsv`, `progress.tsv`, and a final
 summary, uses a lock file to avoid overlapping runs, cleans up transient sender
-and receiver units on stop/failure, and shortens the final step when
-`ENFORCE_RUN_DURATION=true`.
+and receiver units on stop/failure, records failed or interrupted exits in
+`summary.env`, and shortens the final step when `ENFORCE_RUN_DURATION=true`.
+Set `PARTIAL_THROUGHPUT_FACTOR` below `1.0` to leave enough room for concurrent
+targets that run slower than the optimistic baseline.
 
 ## Notifications
 

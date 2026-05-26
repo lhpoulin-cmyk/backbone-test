@@ -8,6 +8,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 ACTIVE_RECEIVERS=()
 ACTIVE_SENDERS=()
 CURRENT_RUN_DIR=""
+RUN_STATUS="starting"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -120,9 +121,29 @@ load_config() {
   NOTIFY_PROFILE="${NOTIFY_PROFILE:-default}"
   NOTIFY_SCHEDULE_FILE="${NOTIFY_SCHEDULE_FILE:-$CONFIG_DIR/notifications.cfg}"
   ESTIMATED_TARGET_BPS="${ESTIMATED_TARGET_BPS:-750000000}"
+  PARTIAL_THROUGHPUT_FACTOR="${PARTIAL_THROUGHPUT_FACTOR:-0.70}"
+  STEP_MAX_GRACE_SECONDS="${STEP_MAX_GRACE_SECONDS:-120}"
   ENFORCE_RUN_DURATION="${ENFORCE_RUN_DURATION:-true}"
   LOCK_FILE="${LOCK_FILE:-/tmp/backbone-source-blast.lock}"
   STOP_FILE="$REPORT_BASE/STOP_REQUESTED"
+}
+
+append_summary_once() {
+  local key="$1" value="$2"
+  [[ -n "$CURRENT_RUN_DIR" && -d "$CURRENT_RUN_DIR" ]] || return 0
+  grep -q "^${key}=" "$CURRENT_RUN_DIR/summary.env" 2>/dev/null && return 0
+  printf '%s=%s\n' "$key" "$value" >> "$CURRENT_RUN_DIR/summary.env"
+}
+
+mark_run_status() {
+  local status="$1" detail="${2:-}"
+  [[ -n "$CURRENT_RUN_DIR" && -d "$CURRENT_RUN_DIR" ]] || return 0
+  append_summary_once "finished" "$(date --iso-8601=seconds)"
+  append_summary_once "status" "$status"
+  if [[ -n "$detail" ]]; then
+    append_summary_once "detail" "$detail"
+  fi
+  append_summary_once "run_dir" "$CURRENT_RUN_DIR"
 }
 
 notify() {
@@ -366,7 +387,36 @@ cleanup_known_units() {
   qm_exec "$SOURCE_JUMP_HOST" "$SOURCE_QMID" "systemctl stop 'backbone-send-*' 2>/dev/null || true" >/dev/null || true
 }
 
+on_error() {
+  local rc="$?" line="${BASH_LINENO[0]:-unknown}" command="${BASH_COMMAND:-unknown}"
+  RUN_STATUS="failed"
+  if [[ -n "$CURRENT_RUN_DIR" && -d "$CURRENT_RUN_DIR" ]]; then
+    printf '[%s] run-error rc=%s line=%s command=%q\n' "$(date --iso-8601=seconds)" "$rc" "$line" "$command" >> "$CURRENT_RUN_DIR/run.log"
+  fi
+  mark_run_status "failed" "rc_${rc}_line_${line}"
+  notify "Source blast failed" "Run failed with rc=$rc at line $line. Report: $CURRENT_RUN_DIR"
+  cleanup_active_units
+  exit "$rc"
+}
+
+on_exit() {
+  local rc="$?"
+  if [[ "$RUN_STATUS" != "completed" && "$RUN_STATUS" != "failed" && "$RUN_STATUS" != "interrupted" ]]; then
+    if (( rc == 0 )); then
+      mark_run_status "completed"
+    else
+      mark_run_status "failed" "rc_${rc}"
+    fi
+  fi
+  cleanup_active_units
+}
+
 on_signal() {
+  RUN_STATUS="interrupted"
+  mark_run_status "interrupted" "signal"
+  if [[ -n "$CURRENT_RUN_DIR" && -d "$CURRENT_RUN_DIR" ]]; then
+    printf '[%s] run-interrupted signal\n' "$(date --iso-8601=seconds)" >> "$CURRENT_RUN_DIR/run.log"
+  fi
   cleanup_active_units
   exit 130
 }
@@ -434,7 +484,7 @@ run_step() {
   done
   max_wait=$((bytes / 125000000 + 300))
   if (( deadline > 0 )); then
-    remaining=$((deadline - start + 60))
+    remaining=$((deadline - start + STEP_MAX_GRACE_SECONDS))
     (( remaining > 0 && remaining < max_wait )) && max_wait="$remaining"
   fi
   last_progress=0
@@ -484,6 +534,7 @@ run_step() {
     fi
     (( all_done == 1 )) && break
     if (( elapsed >= max_wait )); then
+      printf '[%s] step-timeout iteration=%s step=%s elapsed=%ss max_wait=%ss\n' "$(date --iso-8601=seconds)" "$iteration" "$step_name" "$elapsed" "$max_wait" >> "$run_dir/run.log"
       cleanup_active_units
       die "step $step_name did not complete within ${max_wait}s"
     fi
@@ -531,8 +582,10 @@ run_test() {
   printf 'timestamp\titeration\tstep\ttarget\ttarget_ip\tunit\tbaseline_rx_bytes\n' > "$run_dir/baselines.tsv"
   printf 'timestamp\titeration\tstep\ttarget\ttarget_ip\trequested_bytes\treceiver_rx_bytes\telapsed_s\treceiver_rx_Bps\tpercent\teta_s\n' > "$run_dir/progress.tsv"
   printf 'started=%s\nconfig_dir=%s\n' "$(date --iso-8601=seconds)" "$CONFIG_DIR" > "$run_dir/summary.env"
+  RUN_STATUS="running"
   trap on_signal INT TERM
-  trap cleanup_active_units EXIT
+  trap on_error ERR
+  trap on_exit EXIT
   notify "Source blast started" "Run directory: $run_dir. Pattern repeats for $RUN_SECONDS seconds; each target blast requests $(human_bytes "$CHUNK_BYTES")."
   local started deadline now iteration step step_name targets bytes remaining step_bytes estimated_seconds
   started="$(date +%s)"
@@ -553,18 +606,19 @@ run_test() {
         (( remaining <= 0 )) && break
         estimated_seconds=$((bytes / ESTIMATED_TARGET_BPS))
         if (( estimated_seconds > remaining )); then
-          step_bytes=$((remaining * ESTIMATED_TARGET_BPS))
+          step_bytes="$(awk -v seconds="$remaining" -v bps="$ESTIMATED_TARGET_BPS" -v factor="$PARTIAL_THROUGHPUT_FACTOR" 'BEGIN { printf "%d", seconds * bps * factor }')"
           step_bytes=$((step_bytes / 1048576 * 1048576))
           (( step_bytes <= 0 )) && break
-          printf '[%s] partial-step iteration=%s step=%s requested_bytes=%s adjusted_bytes=%s remaining_s=%s\n' \
-            "$(date --iso-8601=seconds)" "$iteration" "$step_name" "$bytes" "$step_bytes" "$remaining" >> "$run_dir/run.log"
+          printf '[%s] partial-step iteration=%s step=%s requested_bytes=%s adjusted_bytes=%s remaining_s=%s estimated_target_Bps=%s factor=%s\n' \
+            "$(date --iso-8601=seconds)" "$iteration" "$step_name" "$bytes" "$step_bytes" "$remaining" "$ESTIMATED_TARGET_BPS" "$PARTIAL_THROUGHPUT_FACTOR" >> "$run_dir/run.log"
         fi
       fi
       run_step "$run_dir" "$iteration" "$step_name" "$targets" "$step_bytes" "$deadline" "$started"
     done
     iteration=$((iteration + 1))
   done
-  printf 'completed=%s\nrun_dir=%s\n' "$(date --iso-8601=seconds)" "$run_dir" >> "$run_dir/summary.env"
+  RUN_STATUS="completed"
+  printf 'completed=%s\nstatus=completed\nrun_dir=%s\n' "$(date --iso-8601=seconds)" "$run_dir" >> "$run_dir/summary.env"
   notify "Source blast complete" "Final report: $run_dir"
   printf '%s\n' "$run_dir"
 }
