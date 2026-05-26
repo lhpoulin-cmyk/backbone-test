@@ -1,0 +1,18 @@
+[Unit]
+Description=Self-hosted ntfy server for backbone alerts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+ExecStartPre=-/usr/bin/podman rm -f ntfy-backbone
+ExecStart=/usr/bin/podman run --name ntfy-backbone --replace --pull=never -p 8099:80 -v /etc/ntfy-backbone/server.yml:/etc/ntfy/server.yml:ro,Z -v /var/lib/ntfy-backbone/cache:/var/cache/ntfy:Z docker.io/binwiederhier/ntfy:latest serve
+ExecStop=/usr/bin/podman stop -t 10 ntfy-backbone
+ExecStopPost=-/usr/bin/podman rm -f ntfy-backbone
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+

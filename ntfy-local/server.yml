@@ -1,0 +1,10 @@
+base-url: "http://receiver-a:8099"
+listen-http: ":80"
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "12h"
+attachment-cache-dir: "/var/cache/ntfy/attachments"
+attachment-total-size-limit: "256M"
+attachment-file-size-limit: "32M"
+visitor-request-limit-burst: 120
+visitor-request-limit-replenish: "10s"
+
