@@ -10,6 +10,9 @@ The project has two related engines:
   available, quirks, errors, and a 1-10 quality score.
 - `source-blast-runbook.sh`: pushes generated data from one source node to one
   or more receivers over TCP with `nc`, while receivers discard to `/dev/null`.
+- `method-suite-runbook.sh`: memtest-style method matrix runner that repeats a
+  named batch of `nc`, `mbuffer`, and `iperf3` tests for a pass count or runtime
+  limit.
 
 Configuration is plain text so scenarios can be copied, reviewed, and changed
 without rebuilding anything.
@@ -24,6 +27,7 @@ without rebuilding anything.
 - `behavior.cfg`: weighted read profile for small, medium, and large files
 - `notifications.cfg`: optional notification cadence profiles
 - `targets.cfg` and `sequence.cfg`: source-blast receivers and push order
+- `tests.cfg`: method-suite named test batch
 
 Worker modes:
 
@@ -74,6 +78,9 @@ Smoke test the local pattern engine:
 - `configs/media-10gbe`: observe, redline, then workday-style sustained read
 - `configs/source-blast-smoke`: tiny source-push sanity check
 - `configs/source-blast-hour`: one-hour source-push profile
+- `configs/method-suite`: repeated named network method matrix
+- `configs/method-suite-smoke`: tiny method-suite sanity check
+- `configs/method-suite-12h`: 12-hour cyclic method-suite profile
 
 The source-blast hour profile repeats until the configured wall clock expires:
 
@@ -99,6 +106,22 @@ the first 1/60th of the run every 10 seconds, the next 5/60ths every 30
 seconds, the next 10/60ths every minute, then every 10 minutes.
 
 `ntfy-local/` contains an optional self-hosted ntfy service and publish helper.
+
+## Method Suite
+
+The method suite runs every enabled `tests.cfg` row as one pass, then repeats the
+same ordered batch. Set `PASS_COUNT=0` with `RUN_DURATION=12h` for a long
+memtest-style soak.
+
+```bash
+BACKBONE_CONFIG_DIR=configs/method-suite ./method-suite-runbook.sh validate
+BACKBONE_CONFIG_DIR=configs/method-suite ./method-suite-runbook.sh list
+BACKBONE_CONFIG_DIR=configs/method-suite ./method-suite-runbook.sh run
+BACKBONE_CONFIG_DIR=configs/method-suite ./method-suite-runbook.sh stop
+```
+
+Results are written to `summary.env`, `results.tsv`, and `run.log`. Optional
+engines write `SKIPPED:<reason>` rows if required tooling is missing.
 
 ## Requirements
 
